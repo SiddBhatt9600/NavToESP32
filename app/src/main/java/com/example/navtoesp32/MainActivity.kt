@@ -109,7 +109,7 @@ class MainActivity : AppCompatActivity() {
                 putExtra(NavForegroundService.EXTRA_ORIGIN_LAT, loc.latitude)
                 putExtra(NavForegroundService.EXTRA_ORIGIN_LON, loc.longitude)
                 putExtra(NavForegroundService.EXTRA_DEST_TEXT, destinationText)
-                putExtra(NavForegroundService.EXTRA_API_KEY, "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImFjMmM2NzM5YWNlMjRkNDM4YjJkMDk4OGZkZWIyNzU2IiwiaCI6Im11cm11cjY0In0=")
+                putExtra(NavForegroundService.EXTRA_API_KEY, BuildConfig.ORS_API_KEY)
             }
             startForegroundService(intent)
             stopButton.isEnabled = true
