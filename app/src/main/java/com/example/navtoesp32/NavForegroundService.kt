@@ -35,6 +35,11 @@ class NavForegroundService : Service() {
     private lateinit var tracker: RouteTracker
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
+    private lateinit var destination: LatLon
+    private lateinit var repo: RouteRepository
+    private var consecutiveOffRouteCount = 0
+    private val offRouteRerouteThreshold = 3 // e.g. 3 consecutive off-route fixes (~6s at 2s interval)
+
     override fun onCreate() {
         super.onCreate()
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
@@ -54,11 +59,16 @@ class NavForegroundService : Service() {
 
         startForeground(NOTIFICATION_ID, buildNotification("Starting navigation..."))
 
-        val repo = RouteRepository(buildOrsApi(), apiKey)
+        // FIX 1: Assign directly to the member field, don't use 'val repo ='
+        repo = RouteRepository(buildOrsApi(), apiKey)
+
         serviceScope.launch {
             try {
                 onStatus?.invoke("Looking up \"$destText\"...")
-                val destination = repo.geocodeAddress(destText)
+                Log.d("NAV", "Geocoding text: '$destText'")
+
+                // FIX 2: Assign directly to the member field, don't use 'val destination ='
+                destination = repo.geocodeAddress(destText)
 
                 onStatus?.invoke("Fetching route...")
                 val steps = repo.fetchRoute(LatLon(originLat, originLon), destination)
@@ -68,6 +78,11 @@ class NavForegroundService : Service() {
                 onStatus?.invoke("Navigating to $destText")
                 startLocationUpdates()
 
+            } catch (e: retrofit2.HttpException) {
+                val errorBody = e.response()?.errorBody()?.string()
+                Log.e("NAV", "HTTP ${e.code()}: $errorBody")
+                onStatus?.invoke("Route lookup failed (HTTP ${e.code()})")
+                stopSelf()
             } catch (e: Exception) {
                 Log.e("NAV", "Failed to start navigation: ${e.message}", e)
                 onStatus?.invoke("Error: ${e.message}")
@@ -90,15 +105,41 @@ class NavForegroundService : Service() {
         val callback = object : LocationCallback() {
             override fun onLocationResult(result: LocationResult) {
                 val loc = result.lastLocation ?: return
-                val payload = tracker.onLocationUpdate(LatLon(loc.latitude, loc.longitude)) ?: return
+                val currentLatLon = LatLon(loc.latitude, loc.longitude)
+                val payload = tracker.onLocationUpdate(currentLatLon) ?: return
+
                 Log.d("NAV", payload.toString())
                 onPayload?.invoke(payload)
                 updateNotification("${payload.turn} onto ${payload.roadName} — ${payload.distanceToTurnM}m")
-                // TODO: send payload to ESP32 — next step
+
+                if (payload.offRoute) {
+                    consecutiveOffRouteCount++
+                    if (consecutiveOffRouteCount >= offRouteRerouteThreshold) {
+                        consecutiveOffRouteCount = 0
+                        triggerReroute(currentLatLon)
+                    }
+                } else {
+                    consecutiveOffRouteCount = 0
+                }
             }
         }
         locationCallback = callback
         fusedLocationClient.requestLocationUpdates(request, callback, mainLooper)
+    }
+
+    private fun triggerReroute(currentLocation: LatLon) {
+        onStatus?.invoke("Off route — recalculating...")
+        serviceScope.launch {
+            try {
+                val newSteps = repo.fetchRoute(currentLocation, destination)
+                tracker = RouteTracker(newSteps)
+                onStatus?.invoke("Rerouted")
+                Log.d("NAV", "Rerouted: ${newSteps.size} new steps")
+            } catch (e: Exception) {
+                Log.e("NAV", "Reroute failed: ${e.message}", e)
+                onStatus?.invoke("Reroute failed, keeping current route")
+            }
+        }
     }
 
     private fun createNotificationChannel() {
@@ -133,8 +174,10 @@ class NavForegroundService : Service() {
         super.onDestroy()
         locationCallback?.let { fusedLocationClient.removeLocationUpdates(it) }
         onStatus?.invoke("Navigation stopped")
-        onPayload = null
-        onStatus = null
+
+        // Clear callbacks and cancel scope jobs
+//        onPayload = null
+//        onStatus = null
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
